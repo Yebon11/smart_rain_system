@@ -1,2 +1,699 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+#include <ezButton.h>
+#include <Adafruit_NeoPixel.h>
+#include <DFRobotDFPlayerMini.h>
+#include "Arduino.h"
+#include "SoftwareSerial.h"
+#include <Wire.h>
+
+
+//LED
+#define LED_PIN 2           // 네오픽셀 D핀과 연결한 아두이노 핀 번호
+#define NUMPIXELS 100   // 네오픽셀 LED 개수
+#define BRIGHTNESS 180  // 네오픽셀 LED 밝기(0 ~ 255) *RGBW만
+  // RGB일 경우 NEO_GRBW 대신 NEO_GRBW 입력
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUMPIXELS, LED_PIN, NEO_GRBW + NEO_KHZ800);
+
+
+// FSM 상태 정의
+#define IDE 0
+#define RAINED_MODE 1
+#define AFTER_RAINED_MODE 2
+#define DRY_MODE 3 
+#define OPEN_MODE 4
+#define CLOSE_MODE 5
+#define STOP_MODE 6
+// 처음 상태 초기화
+int mode = IDE;
+int doorState = 0; // 초기 상태: 문 닫힘
+ezButton limitSwitch_1(A0);  // A0 핀에 연결된 ezButton 객체 생성
+ezButton limitSwitch_2(A1);  // A1 핀에 연결된 ezButton 객체 생성
+
+
+// 음성 출력
+SoftwareSerial mySoftwareSerial(12, 13); // RX, TX 핀 번호
+DFRobotDFPlayerMini myDFPlayer;
+unsigned long playerMILLIS = 0;
+const long interval = 5000;
+int doing = 1;
+#define RESET 1
+#define OPEN 3
+#define WARNING 2
+#define CLOSE 4
+
+
+//DC모터 변수
+#define DIRECTION_CCW -1
+#define STOP 0
+#define DIRECTION_CW 1
+
+#define ENB_PIN 5  // ENB 핀에 연결된 아두이노 핀
+#define INB3_PIN 9 // IN3 핀에 연결된 아두이노 핀
+#define INB4_PIN 8 // IN4 핀에 연결된 아두이노 핀
+
+int direction = DIRECTION_CW;
+
+
+//리니어
+#define ENA_PIN 6  // 모터 속도 제어 핀
+#define IN1_PIN 10 // 모터 전진 방향 핀
+#define IN2_PIN 11 // 모터 후진 방향 핀
+int enable = 0;
+unsigned long linearMILLIS = 0;
+const long waiting = 4000; // 리니어 작동 시간
+
+
+//빗물감지 변수
+#define IR_SENSOR_PIN 7
+#define Raindrops_pin A3
+#define water_time 5000
+unsigned long pretime = 0; //기준 시간 저장 변수
+int WetThreshold = 500; //병렬연결 된 물감지센서의 임계값
+bool isRaining = false;
+
+
+//LED
+#define RED 1
+#define YELLOW 2
+#define WHITE 3
+#define GREEN 4
+#define BLUE 5
+#define PINK 6
+#define PURPLE 7
+int color = YELLOW;
+
+
+// 쓰레기 초음파
+//Trash(Full)
+#define t_trigPin  3 // 트리거 핀
+#define t_echoPin 4 // 에코 핀
+const float maxHeight = 20.0; // 예: 100cm 높이의 탱크
+const float threshold = maxHeight * 0.3;
+
+
+//배터리
+#define batteryPin A2        // 배터리 전압을 읽을 핀
+const float referenceVoltage = 5; // Arduino의 참조 전압 (5V 기준)
+const int batteryCount = 6;      // 배터리 개수
+
+const float maxVoltage = 1.5 * batteryCount; // 배터리 팩 최대 전압
+const float minVoltage = 1 * batteryCount; // 배터리 팩 최소 전압
+
+
+//블루투스
+#define SLAVE_ADDRESS 8  // Arduino I2C 슬레이브 주소
+int sensorState;
+int trashPercentage;
+int batteryPercentage;  
+
+
+//적외선 센서 체크 함수 : 사람 있으면 0/ 없으면 1
+int checkIRsensor() {
+  bool IRsensor = digitalRead(IR_SENSOR_PIN); //적외선 센서의 상태를 읽음
+  
+  Serial.print("IR value : ");
+  Serial.println(IRsensor);
+
+  if (IRsensor == 1) { //사람이 없음
+    return 1;
+  }
+  else {
+    return 0;
+  }
+}
+
+
+//DC MOTOR
+void DCmotor(int direction) {
+  switch (direction) {
+    case 1:
+      digitalWrite(ENB_PIN, HIGH);
+      digitalWrite(INB3_PIN, LOW); //정방향
+      digitalWrite(INB4_PIN, HIGH); 
+      break;
+
+    case 0:
+      digitalWrite(ENB_PIN, LOW);
+      break;
+
+    case -1:
+      digitalWrite(ENB_PIN, HIGH);
+      digitalWrite(INB3_PIN, HIGH); //역방향
+      digitalWrite(INB4_PIN, LOW);
+      break; 
+  }
+}
+
+
+//LED
+void LED(int color) {
+  switch (color){
+    case 1:
+      // 문 열림 - 빨간색 (255,20,0)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 255, 20, 0, 0); 
+      }
+      strip.show();
+      break;
+
+    case 2:
+      // 평상시 (문 닫힘 상태 유지) - 노란색 (255,180,0)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 255, 180, 0, 0); 
+      }
+      strip.show();
+      break;
+
+    case 3:
+      // 우천시 (문 열림 상태 유지) - 흰색 (255,255,255)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 255, 255, 255, 0);
+      }
+      strip.show();
+      break;
+
+    case 4:
+      // 문 닫힘 - 초록색 (0,255,0)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 0, 255, 0, 0);
+      }
+      strip.show();
+      break;
+    case 5:
+      // 파란색 (0,150,255)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 0, 150, 255, 0);
+      }
+      strip.show();
+      break;
+    case 6:
+      // 핑크색 (255,0,150)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 255, 0, 150, 0);
+      }
+      strip.show();
+      break;
+    case 7:
+      // 보라색 (150,0,255)
+      for (int i = 0; i < NUMPIXELS; i++) {
+        strip.setPixelColor(i, 150, 0, 255, 0);
+      }
+      strip.show();
+      break;   
+  }
+}
+
+
+// 쓰레기 초음파
+int Trash() {
+  digitalWrite(t_trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(t_trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(t_trigPin, LOW);
+
+  long duration = pulseIn(t_echoPin, HIGH);
+  long distance = duration * 0.034 / 2; // cm 단위 거리 계산
+
+  int height_pc = (maxHeight - distance)/maxHeight*100;
+  if (height_pc >= 70) {
+    // 쓰레기통 70% 이상일 시 경고
+    Serial.println("Warning: OVER 70% !!!! ");
+  } else {
+    // 쓰레기통 용량 %로 표시
+    if (height_pc >= 0) {
+      Serial.print("Measured Height percentage: ");
+      Serial.print(height_pc);
+      Serial.println(" %");
+    } else {
+      // (maxHeight - distance)가 음수일 시 0%로 표시
+      height_pc = 0;
+      Serial.print("Measured Height percentage: ");
+      Serial.println("0 %");
+    }
+  }
+
+  return height_pc;
+}
+
+
+// 배터리 퍼센트
+float Battery_percent() {
+  int analogValue = analogRead(batteryPin);
+  float batteryVoltage = ((analogValue * referenceVoltage * 3) / 1023);
+  float batteryPercentage = ((batteryVoltage - minVoltage) / (maxVoltage - minVoltage)) * 100;
+  batteryPercentage = constrain(batteryPercentage, 0, 100);
+  
+  // 결과를 시리얼 모니터에 출력
+  Serial.print("Battery Voltage: ");
+  Serial.print(batteryVoltage, 2); // 소수점 2자리까지 출력
+  Serial.println(" V, ");
+  Serial.print("Battery Percentage: ");
+  Serial.print(batteryPercentage, 1); // 소수점 1자리까지 출력
+  Serial.println(" %");
+
+  return batteryPercentage; // 반환 값 유지
+}
+
+
+// ESP32 블루투스
+// 마스터가 데이터를 요청할 때 호출되는 함수
+void requestEvent() {
+  // 문자열로 데이터 구성
+  String data = String("999, ") + 
+                String(sensorState) + 
+                ", " + 
+                String(doorState) + 
+                ", " + 
+                String(trashPercentage) + 
+                ", " + 
+                String(batteryPercentage) + "%" + 
+                ", 888";
+  // Wire.write로 문자열 전송
+  Wire.write(data.c_str());  // c_str()으로 String을 char 배열로 변환2
+}
+
+
+void receiveEvent(int howMany) {
+  if (howMany > 0) {
+    int receivedData = Wire.read(); // I2C 데이터 수신
+    Serial.print("I2C로 받은 데이터: ");
+    Serial.println(receivedData);
+
+    if (receivedData == 1) {
+      mode = OPEN_MODE;
+     }
+    if (receivedData == 2){
+      mode = CLOSE_MODE;
+      }
+    if (receivedData == 3){
+      mode = IDE;
+      }
+
+    // 데이터 처리 후 초기화
+    receivedData = 0;
+  }
+}
+
+
+
+void setup() {
+  Serial.begin(9600);
+
+  //리미트 스위치
+  limitSwitch_1.setDebounceTime(50);  // 디바운스 시간을 50밀리초로 설정
+  limitSwitch_2.setDebounceTime(50);  // 디바운스 시간을 50밀리초로 설정
+
+  //블루투스
+  Wire.begin(SLAVE_ADDRESS);  // I2C 슬레이브로 시작
+  Wire.onRequest(requestEvent);  // 마스터가 데이터를 요청할 때 호출될 함수 설정
+  Wire.endTransmission();    // 전송 종료
+  
+  //DC모터
+  pinMode(ENB_PIN, OUTPUT);
+  pinMode(INB3_PIN, OUTPUT);
+  pinMode(INB4_PIN, OUTPUT);
+
+  analogWrite(ENB_PIN, 0);
+  Wire.onReceive(receiveEvent); // 데이터 수신 시 호출할 콜백 함수 설정
+  
+  //빗물감지
+  pinMode(Raindrops_pin, INPUT);
+  unsigned long pretime = 0; //기준 시간 저장 변수
+  bool isRaining = false;
+  
+  //IR센서
+  pinMode(IR_SENSOR_PIN, INPUT);  // IR_SENSOR_PIN을 입력으로 설정
+  
+  //LED
+  pinMode(LED_PIN, OUTPUT);
+  strip.begin();                    // 네오픽셀 초기화(필수)
+  strip.setBrightness(BRIGHTNESS);  // 네오픽셀 밝기 설정 *RGBW만
+  strip.show();
+
+  //DFP player
+  mySoftwareSerial.begin(9600);
+
+  if (!myDFPlayer.begin(mySoftwareSerial, false)) {  //Use softwareSerial to communicate with mp3.
+    Serial.println(F("Unable to begin:"));
+    Serial.println(F("1.Please recheck the connection!"));
+    Serial.println(F("2.Please insert the SD card!"));
+    while(true){
+      delay(0); // Code to compatible with ESP8266 watch dog.
+    }
+  }
+  Serial.println(F("DFPlayer Mini online."));
+  
+  myDFPlayer.volume(20);  //Set volume value. From 0 to 30
+
+  unsigned long playerMILLIS = 0;
+
+  // 쓰레기 초음파
+  pinMode(t_trigPin, OUTPUT);
+  pinMode(t_echoPin, INPUT);
+
+  // 리니어
+  pinMode(ENA_PIN, OUTPUT);
+  pinMode(IN1_PIN, OUTPUT);
+  pinMode(IN2_PIN, OUTPUT);
+}
+
+
+
+void loop() {
+
+  unsigned long nowtime = millis();
+  unsigned long currentMillis = millis();
+  unsigned long nowMillis = millis();
+
+  limitSwitch_1.loop();  // 반드시 loop() 함수를 먼저 호출해야 함
+  limitSwitch_2.loop();  // 반드시 loop() 함수를 먼저 호출해야 함
+
+  int value = analogRead(Raindrops_pin);
+  Serial.print("Value : "); // 평상 시 물감지 센서 저항값
+  Serial.println(value);
+
+  // 블루투스
+    // 적외선 사람 감지 확인
+  sensorState = checkIRsensor(); // 적외선 센서의 상태를 읽음
+    // 쓰레기통 용량 확인
+  trashPercentage = Trash();
+    // 배터리 용량 확인
+  batteryPercentage = Battery_percent();
+
+  // FSM 상태에 따른 동작
+  switch (mode) {
+    case IDE:
+      //평상시에 노란색
+      LED(YELLOW);
+      enable = 0;
+        
+      if (value < WetThreshold) {  // 물 감지가 된 경우
+        if(!isRaining) {
+          pretime = nowtime;
+          isRaining = true;
+          Serial.println("Raining detected. Starting timer.");
+        }
+        if (nowtime - pretime >= water_time) { // 물 감지 후 일정 시간이 지났을 때
+          Serial.println("Switching to RAINED_MODE."); // RAINED_MODE(우천) 상태로 상태 변경
+          mode = RAINED_MODE;
+
+          isRaining = false; // 상태 변경 후 플래그 해제
+
+          Serial.print("Current mode after switching: ");
+          Serial.println(mode); // 변경 후 상태 확인
+        }
+
+      } else {
+        isRaining = false; // 물이 감지되지 않으면 플래그 해제
+      }
+
+      break;
+
+    case RAINED_MODE:
+      if (limitSwitch_1.isPressed()) {  // limitSwitch_1가 눌리면 닫기 동작 후 AFTER_RAINED_MODE로 상태 전환
+        DCmotor(STOP);
+        doorState = 1; // 문 열림
+        Serial.println(F("The limit switch 1: TOUCHED"));
+
+        // 상태가 전환되는 부분 확인을 위한 메시지
+        Serial.print("Current mode before switching: ");
+        Serial.println(mode); // 현재 상태 확인
+
+        // 상태 전환
+        mode = AFTER_RAINED_MODE;
+        Serial.println("Switching to AFTER_RAINED_MODE."); // 상태 전환 메시지
+        
+        Serial.print("Current mode after switching: ");
+        Serial.println(mode); // 전환 후 상태 확인
+        
+        // 우천시 (문 열림 상태 유지) - 흰색
+        LED(WHITE);
+
+      } else {
+        // 리니어 올라갈 때
+        Serial.println("Extending actuator..."); // 전진
+        digitalWrite(IN1_PIN, LOW);
+        digitalWrite(IN2_PIN, HIGH);
+        analogWrite(ENA_PIN, 255); // 최대 속도
+
+        if (!enable) {
+          linearMILLIS = nowMillis;
+          enable = 1;
+        }
+        if (nowMillis - linearMILLIS >= waiting) {
+          digitalWrite(IN1_PIN, LOW);
+          digitalWrite(IN2_PIN, LOW);
+          analogWrite(ENA_PIN, 0); // 모터 정지
+        }
+        
+
+        // 문 열릴 때 - 빨간색
+        LED(RED);
+
+        if (checkIRsensor()){
+          DCmotor(DIRECTION_CW); // 모터 시계 방향 회전
+        
+          // DC모터가 열릴 때(음성: 문이 열립니다
+          if (doing != OPEN) {
+            myDFPlayer.play(3);
+            playerMILLIS = currentMillis;
+            doing = OPEN;
+          }
+          if (currentMillis - playerMILLIS >= interval) {
+            doing = RESET;
+          }
+        } else {
+          DCmotor(STOP); // 모터 정지
+
+          Serial.println("WARNING!");
+          //(사람 감지시) 음성: 주의하세요.
+          if (doing != WARNING) {
+            myDFPlayer.play(2);
+            playerMILLIS = currentMillis;
+            doing = WARNING;
+          }
+          if (currentMillis - playerMILLIS >= interval) {
+            doing = RESET;
+          }
+        }
+      }
+
+      break;
+
+    case AFTER_RAINED_MODE:
+      enable = 0;
+
+      if (value >= WetThreshold) { // 물 감지가 끝났을 때
+        if (!isRaining) {
+          pretime = nowtime;
+          isRaining = true;
+          Serial.println("Dry condition detected. Starting timer for DRY_MODE.");
+        }
+        if (nowtime - pretime >= water_time) { // 물 감지가 끝난 후 일정 시간이 지났을 때
+          Serial.println("Switching to DRY_MODE."); // DRY_MODE(문 닫기) 상태로 상태 변경
+          mode = DRY_MODE;
+
+          isRaining = false; // 상태 변경 후 플래그 헤제
+
+          Serial.print("Current mode after switching: ");
+          Serial.println(mode); // 전환 후 상태 확인
+        }
+      } 
+      else {
+        isRaining = false; // 물이 감지되면 플래그 해제
+      }
+
+      break;
+      
+    case DRY_MODE:          
+      if (limitSwitch_2.isPressed()) { // limitSwitch_2가 눌리면 닫기 동작 후 IDE로 상태 전환
+        DCmotor(STOP);
+        doorState = 0; // 문 닫힘
+        Serial.println(F("The limit switch 2: TOUCHED"));
+
+        // 리니어 내려갈 때
+        Serial.println("Retracting actuator..."); // 후진
+        digitalWrite(IN1_PIN, HIGH);
+        digitalWrite(IN2_PIN, LOW);
+        analogWrite(ENA_PIN, 255); // 최대 속도
+
+        if (!enable) {
+          linearMILLIS = nowMillis;
+          enable = 1;
+        }
+        if (nowMillis - linearMILLIS >= waiting) {
+          digitalWrite(IN1_PIN, LOW);
+          digitalWrite(IN2_PIN, LOW);
+          analogWrite(ENA_PIN, 0); // 모터 정지
+        }
+
+        // 상태가 전환되는 부분 확인을 위한 메시지
+        Serial.print("Current mode before switching: ");
+        Serial.println(mode); // 현재 상태 확인
+
+        // 상태 전환
+        mode = IDE;
+        Serial.println("Returning to IDE mode."); // 상태 전환 메시지
+
+          
+        Serial.print("Current mode after switching: ");
+        Serial.println(mode); // 전환 후 상태 확인
+      } 
+      else {
+        // 닫힐 때 초록색
+        LED(GREEN);
+        Serial.println("CLOSE"); // 닫히는 중임을 표시
+
+        if (checkIRsensor()){
+          DCmotor(DIRECTION_CCW); // 모터 시계 반대 방향 회전
+            
+          // DC모터가 닫힐 때(음성 : 문이 닫힙니다)
+          if (doing != CLOSE) {
+            myDFPlayer.play(4);
+            playerMILLIS = currentMillis;
+            doing = CLOSE;
+          }
+          if (currentMillis - playerMILLIS >= interval) {
+            doing = RESET;
+          }
+        }
+        else {
+          DCmotor(STOP); // 모터 정지
+          Serial.println("WARNING!");
+          //(사람 감지시) 음성: 주의하세요.
+          if (doing != WARNING) {
+            myDFPlayer.play(2);
+            playerMILLIS = currentMillis;
+            doing = WARNING;
+          }
+          if (currentMillis - playerMILLIS >= interval) {
+            doing = RESET;
+          }
+        }
+      }
+      break;
+
+  case OPEN_MODE:
+    if (limitSwitch_1.isPressed()) {  // limitSwitch_1가 눌리면 닫기 동작 후 AFTER_RAINED_MODE로 상태 전환
+      DCmotor(STOP);
+      mode = STOP_MODE;
+      doorState = 1; // 문 열림
+      Serial.println(F("The limit switch 1: TOUCHED"));
+    } else {
+      // 우천시 (문 열림 상태 유지) - 파란색
+      LED(BLUE);
+
+      // 리니어 올라갈 때
+      Serial.println("Extending actuator..."); // 전진
+      digitalWrite(IN1_PIN, LOW);
+      digitalWrite(IN2_PIN, HIGH);
+      analogWrite(ENA_PIN, 255); // 최대 속도
+
+      if (!enable) {
+        linearMILLIS = nowMillis;
+        enable = 1;
+      }
+      if (nowMillis - linearMILLIS >= waiting) {
+        digitalWrite(IN1_PIN, LOW);
+        digitalWrite(IN2_PIN, LOW);
+        analogWrite(ENA_PIN, 0); // 모터 정지
+      }
+
+      if (checkIRsensor()){
+        DCmotor(DIRECTION_CW); // 모터 시계 방향 회전
+        
+        // DC모터가 열릴 때(음성: 문이 열립니다)
+        if (doing != OPEN) {
+          myDFPlayer.play(3);
+          playerMILLIS = currentMillis;
+          doing = OPEN;
+        }
+        if (currentMillis - playerMILLIS >= interval) {
+          doing = RESET;
+        }
+      } else {
+        DCmotor(STOP); // 모터 정지
+
+        Serial.println("WARNING!");
+        //(사람 감지시) 음성: 주의하세요.
+        if (doing != WARNING) {
+          myDFPlayer.play(2);
+          playerMILLIS = currentMillis;
+          doing = WARNING;
+        }
+        if (currentMillis - playerMILLIS >= interval) {
+          doing = RESET;
+        }
+      }
+    }
+    break;
+
+
+    case CLOSE_MODE:          
+      if (limitSwitch_2.isPressed()) { // limitSwitch_2가 눌리면 닫기 동작 후 IDE로 상태 전환
+        DCmotor(STOP);
+        mode = STOP_MODE;
+        doorState = 0; // 문 닫힘
+        Serial.println(F("The limit switch 2: TOUCHED"));
+
+
+        // 리니어 내려갈 때
+        Serial.println("Retracting actuator..."); // 후진
+        digitalWrite(IN1_PIN, HIGH);
+        digitalWrite(IN2_PIN, LOW);
+        analogWrite(ENA_PIN, 255); // 최대 속도
+
+        if (!enable) {
+          linearMILLIS = nowMillis;
+          enable = 1;
+        }
+        if (nowMillis - linearMILLIS >= waiting) {
+          digitalWrite(IN1_PIN, LOW);
+          digitalWrite(IN2_PIN, LOW);
+          analogWrite(ENA_PIN, 0); // 모터 정지
+        }
+      } 
+      else {
+        // 닫힐 때 핑크색
+        LED(PINK);
+        Serial.println("CLOSE"); // 닫히는 중임을 표
+
+        if (checkIRsensor()){
+          DCmotor(DIRECTION_CCW); // 모터 시계 반대 방향 회전
+            
+          // DC모터가 닫힐 때(음성 : 문이 닫힙니다)
+          if (doing != CLOSE) {
+            myDFPlayer.play(4);
+            playerMILLIS = currentMillis;
+            doing = CLOSE;
+          }
+          if (currentMillis - playerMILLIS >= interval) {
+            doing = RESET;
+          }
+        }
+        else {
+          DCmotor(STOP); // 모터 정지
+          Serial.println("WARNING!");
+          //(사람 감지시) 음성: 주의하세요.
+          if (doing != WARNING) {
+            myDFPlayer.play(2);
+            playerMILLIS = currentMillis;
+            doing = WARNING;
+          }
+          if (currentMillis - playerMILLIS >= interval) {
+            doing = RESET;
+          }
+        }
+      }
+      break;
+
+    case STOP_MODE:
+      Serial.println("The Door is STOP!!");
+      break;
+       
+    default: 
+      DCmotor(STOP);
+      break;
+  }
+}
+  
