@@ -1,0 +1,50 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+#include <Wire.h>
+#include <BluetoothSerial.h>
+
+BluetoothSerial SerialBT;
+#define SLAVE_ADDRESS 8  
+unsigned long lastRequestTime = 0;
+const unsigned long requestInterval = 1000;  
+
+void setup() {
+  Serial.begin(9600);       
+  Wire.begin();              
+  SerialBT.begin("ESP32_BT");  
+  Serial.println("Bluetooth 연결 대기 중...");
+}
+
+void loop() {
+  char receivedData[24] = {0};  // 수신 데이터 저장용 버퍼 (최대 32바이트)
+
+  // I2C로 Arduino에서 데이터 요청
+  Wire.requestFrom(SLAVE_ADDRESS, sizeof(receivedData));  // 최대 32바이트 요청
+
+  int i = 0;
+  while (Wire.available() && i < sizeof(receivedData) - 1) {
+    receivedData[i++] = Wire.read();  // 데이터를 1바이트씩 읽어 배열에 저장
+  }
+  receivedData[i] = '\0';  // 문자열 끝에 NULL 문자 추가
+
+  if (i > 0) {
+    Serial.print("수신된 센서 데이터: ");
+    Serial.println(receivedData);  // 시리얼 모니터에 데이터 출력
+    SerialBT.println(receivedData);  // Bluetooth로 데이터 전송
+  } else {
+    Serial.println("데이터 없음");
+  }
+
+   // Bluetooth를 통해 수신된 데이터가 있으면 시리얼 모니터에 출력
+  if (SerialBT.available()) {
+    int received = SerialBT.read();
+    Serial.print("수신된 데이터: ");
+    Serial.println(received);
+    if (received){
+      Wire.beginTransmission(SLAVE_ADDRESS); // Arduino와 통신 시작
+      Wire.write(received); // 수신한 데이터 전송
+      Wire.endTransmission(); // 통신 종료
+      Serial.println("I2C로 데이터 전송 완료");
+    }
+  }
+}
